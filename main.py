@@ -1,13 +1,20 @@
 import torch
 
+# ? why did original tf version do this?
+def make_divisible(v:float, divisor:int, min_value:int):
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    if (new_v < 0.9 * v):
+        return new_v + divisor
+    return new_v
 
 class SqueezeAndExcitation(torch.nn.Module):
     def __init__(self, in_channels):
+        self.squeeze = make_divisible(in_channels // 4, 8, 8)
         super().__init__()
         self.avg = torch.nn.AdaptiveAvgPool2d(1)
-        self.f1 = torch.nn.Conv2d(in_channels, in_channels // 4, 1)
+        self.f1 = torch.nn.Conv2d(in_channels, self.squeeze, 1)
         self.act = torch.nn.ReLU()
-        self.f2 = torch.nn.Conv2d(in_channels // 4, in_channels, 1)
+        self.f2 = torch.nn.Conv2d(self.squeeze, in_channels, 1)
         self.scale_act = torch.nn.Hardsigmoid()
 
     def forward(self, input:torch.Tensor):
@@ -27,31 +34,54 @@ class PrintShape(torch.nn.Module):
         return input
 
 
-def Bottleneck(kernel_size, in_channels, exp_channels, out_channels, activation, stride, se, layer):
-    selayer = torch.nn.Identity()
-    if se:
-        selayer = SqueezeAndExcitation(exp_channels)
-    pad = 1
-    if kernel_size == 5:
-        pad = 2
-    return torch.nn.Sequential(
-        # Expand channels
-        torch.nn.Conv2d(in_channels=in_channels, out_channels=exp_channels, kernel_size=1),
-        torch.nn.BatchNorm2d(num_features=exp_channels),
-        activation(),
-        # 3x3 depthwise convolution with activation
-        torch.nn.Conv2d(in_channels=exp_channels, out_channels=exp_channels, groups=exp_channels, kernel_size=kernel_size, stride=stride, padding=pad),
-        torch.nn.BatchNorm2d(num_features=exp_channels),
-        activation(),
-        # squeeze and excitation
-        selayer,
-        # Linear pointwise convolution
-        torch.nn.Conv2d(in_channels=exp_channels, out_channels=out_channels, kernel_size=1),
-        torch.nn.BatchNorm2d(num_features=out_channels),
+class Bottleneck(torch.nn.Module):
+    def __init__(self, kernel_size, in_channels, exp_channels, out_channels, activation, stride, se, layer):
+        super().__init__()
+        selayer = torch.nn.Identity()
+        if se:
+            selayer = SqueezeAndExcitation(exp_channels)
+        pad = 1
+        if kernel_size == 5:
+            pad = 2
 
-        # debug
-        PrintShape(layer)
-    )
+        expand = torch.nn.Identity()
+        if exp_channels != in_channels:
+            expand = torch.nn.Sequential(
+                torch.nn.Conv2d(in_channels=in_channels, out_channels=exp_channels, kernel_size=1, bias=False),
+                torch.nn.BatchNorm2d(num_features=exp_channels),
+                activation(),
+            )
+
+        self.bottleneck = torch.nn.Sequential(
+            # Expand channels
+            expand,
+            # 3x3 depthwise convolution with activation
+            torch.nn.Conv2d(in_channels=exp_channels,
+                            out_channels=exp_channels,
+                            groups=exp_channels,
+                            kernel_size=kernel_size,
+                            stride=stride,
+                            padding=pad,
+                            bias=False),
+
+            torch.nn.BatchNorm2d(num_features=exp_channels),
+            activation(),
+            # squeeze and excitation
+            selayer,
+            # Linear pointwise convolution
+            torch.nn.Conv2d(in_channels=exp_channels, out_channels=out_channels, kernel_size=1, bias=False),
+            torch.nn.BatchNorm2d(num_features=out_channels),
+
+            # debug
+            PrintShape(layer)
+        )
+
+    def forward(self, input:torch.Tensor):
+        output = self.bottleneck(input)
+        if (output.shape == input.shape):
+            return output + input
+        else:
+            return output
 
 
 class MobileNetV3(torch.nn.Module):
@@ -79,25 +109,23 @@ class MobileNetV3(torch.nn.Module):
             Bottleneck(5, 112, 672, 160, torch.nn.Hardswish, 2, True, 13),
             Bottleneck(5, 160, 960, 160, torch.nn.Hardswish, 1, True, 14),
             Bottleneck(5, 160, 960, 160, torch.nn.Hardswish, 1, True, 15),
-        )
 
-        self.head = torch.nn.Sequential(
-            torch.nn.Conv2d(160, 960, 1),
+            torch.nn.Conv2d(160, 960, 1, bias=False),
             torch.nn.BatchNorm2d(960),
             torch.nn.Hardswish(),
+        )
 
+        self.classifier = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d(1),
-
             torch.nn.Conv2d(960, 1280, 1),
             torch.nn.Hardswish(),
-
             torch.nn.Conv2d(1280, 1000, 1)
         )
 
     def forward(self, input:torch.Tensor):
         output = self.layer0(input)
         output = self.bottlenecks(output)
-        output = self.head(output)
+        output = self.classifier(output)
         return output.reshape(1, -1)
 
 if __name__ == "__main__":
