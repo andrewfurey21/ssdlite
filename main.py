@@ -106,10 +106,13 @@ class MobileNetV3(torch.nn.Module):
             Bottleneck(3, 80, 184, 80, torch.nn.Hardswish, 1, False, 10),
             Bottleneck(3, 80, 480, 112, torch.nn.Hardswish, 1, True, 11),
             Bottleneck(3, 112, 672, 112, torch.nn.Hardswish, 1, True, 12),
-            Bottleneck(5, 112, 672, 160, torch.nn.Hardswish, 2, True, 13),
+            Bottleneck(5, 112, 672, 160, torch.nn.Hardswish, 2, True, 13), # c4
             Bottleneck(5, 160, 960, 160, torch.nn.Hardswish, 1, True, 14),
             Bottleneck(5, 160, 960, 160, torch.nn.Hardswish, 1, True, 15),
 
+        )
+
+        self.c5 = torch.nn.Sequential( # c5
             torch.nn.Conv2d(160, 960, 1, bias=False),
             torch.nn.BatchNorm2d(960),
             torch.nn.Hardswish(),
@@ -125,10 +128,12 @@ class MobileNetV3(torch.nn.Module):
     def forward(self, input:torch.Tensor):
         output = self.layer0(input)
         output = self.bottlenecks(output)
+        output = self.c5(output)
         output = self.classifier(output)
         return output.reshape(1, -1)
 
 if __name__ == "__main__":
+    # TODO: make sure input/output matches given the same parameters
     input = torch.randn((1, 3, 224, 224))
     model = MobileNetV3()
     output = model(input)
